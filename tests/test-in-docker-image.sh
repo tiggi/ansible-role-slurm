@@ -128,6 +128,15 @@ function extra_tests(){
 
     echo "TEST: cat /etc/slurm/slurm.conf"
     cat /etc/slurm/slurm.conf
+
+    echo "TEST: sinfo"
+    sinfo
+
+    echo "TEST: scontrol show node"
+    scontrol show node
+
+    echo "TEST: time srun --immediate=30 env"
+    time srun --immediate=30 env
     
 }
 

@@ -1,13 +1,7 @@
 ---
   - name: install slurm service specific packages
-    yum: "name={{ item }} state=present"
+    package: "name={{ item }} state=present"
     with_items: "{{ slurm_service_packages }}"
-
-  - name: print systemctl_slurm_status
-    debug: "var=systemctl_slurm_status"
-    tags: debug
-    when: ansible_os_family == "RedHat" and ansible_distribution_major_version == "7"
-    changed_when: False
 
   - name: does the munge.key exist?
     stat: path=/etc/munge/munge.key
@@ -20,7 +14,7 @@
     register: mungekeygen
     when: mungekeystat is defined and mungekeystat.stat.exists == False
 
-  - name: get munge key for distribution to nodes
+  - name: Fetch munge key from Service node for distribution to nodes
     fetch: src=/etc/munge/munge.key
            dest=files/munge.key
            fail_on_missing=yes
@@ -34,54 +28,9 @@
     copy: src=files/munge.key dest={{ slurm_munge_key_nfs }} mode=0400 owner=munge group=munge
     when: slurm_munge_key_to_nfs
 
-  - name: create build dirs
-    file: path="/root/rpmbuild/{{ item }}" state=directory
-    with_items:
-        - "BUILD"
-        - "RPMS"
-        - "SOURCES"
-        - "SPECS"
-        - "SRPMS"
-    when: slurm_build == True
-
-  - name: download Slurm source
-    get_url: url="http://www.schedmd.com/download/latest/slurm-{{ slurm_version }}.tar.bz2" dest="/root/rpmbuild/SOURCES/slurm-{{ slurm_version }}.tar.bz2"
-    when: slurm_build == True
-
-  - name: Extract Slurm source 2
-    command: "tar -xjf /root/rpmbuild/SOURCES/slurm-{{ slurm_version}}.tar.bz2 -C /root/rpmbuild/SOURCES/ creates=/root/rpmbuild/SOURCES/slurm-{{ slurm_version }}"
-    when: slurm_build == True
-
-  - name: build Slurm
-    command: "{{ item }} chdir=/root/rpmbuild/SOURCES/slurm-{{ slurm_version}}/ creates=/root/rpmbuild/RPMS/x86_64/slurm-{{ slurm_version }}-1.el{{major_release}}.x86_64.rpm"
-    with_items:
-       - "rpmbuild -bb --with lua  slurm.spec"
-       #- ./configure
-       #- "/usr/bin/make"
-       #- "/usr/bin/make install"
-    when: slurm_build == True
-
-  - name: get slurm rpms to then distribute them to the nodes
-    fetch: src={{ item }}
-           dest=roles/slurm_common/files/
-           fail_on_missing=yes
-           flat=yes
-    with_items:
-         - "/root/rpmbuild/RPMS/x86_64/slurm-plugins-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-perlapi-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-slurmdb-direct-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-sql-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-lua-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-devel-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-pam_slurm-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-sjstat-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-slurmdbd-{{ slurm_version }}-1.el6.x86_64.rpm"
-        #- "/root/rpmbuild/RPMS/x86_64/slurm-spank-x11-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-torque-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-munge-{{ slurm_version }}-1.el6.x86_64.rpm"
-         - "/root/rpmbuild/RPMS/x86_64/slurm-sjobexit-{{ slurm_version }}-1.el6.x86_64.rpm"
-    when: slurm_build == True
+# a few remaining slurm_build tasks
+  - include: build_service.yml
+    when: "slurm_build == True and 'slurm_service' in group_names and ansible_os_family == 'RedHat'"
 
   - name: add slurm unix group
     group: name=slurm system=no state=present
@@ -114,6 +63,22 @@
   - name: start and enable munge
     service: name=munge state=started enabled=yes
 
+  - name: copy in munge key to slurm_accounting_storage_host too if it is different than the service node
+    copy: src=files/munge.key
+          dest=/etc/munge/munge.key
+          owner=munge
+          group=munge
+          mode=0400
+    delegate_to: "{{ slurm_accounting_storage_host }}"
+    when: slurm_accounting_storage_host != ansible_hostname
+    notify:
+     - restart munge
+
+  - name: start and enable munge on the slurm_accounting_storage_host too if it is different than the service node
+    service: name=munge state=started enabled=yes
+    delegate_to: "{{ slurm_accounting_storage_host }}"
+    when: slurm_accounting_storage_host != ansible_hostname
+
   - name: Increase net.core.somaxconn for slurmctld
     sysctl: name=net.core.somaxconn
             value={{ slurm_sysctl_core_somaxconn }}
@@ -127,17 +92,18 @@
     when: slurm_manage_sysctl
 
   - name: install Slurm ( state=present - not updating )
-    yum: name={{ item }} state=present
+    package: name={{ item }} state=present
     with_items: "{{ slurm_packages }}"
 
-  - name: add slurm log dir
-    file: path={{ slurm_log_dir }} state=directory owner=slurm group=slurm mode=0750
+    # slurmdbd needs to be started after the slurm unix user is created
+  - name: start and enable slurmdbd on slurm_accounting_storage_host
+    service: name=slurmdbd state=started enabled=yes
+    delegate_to: "{{ slurm_accounting_storage_host }}"
+    when: slurm_accounting_storage_host != ansible_hostname
 
-  - name: add slurmd tmp dir
-    file: "path={{ slurmd_tmp_dir }} state=directory owner=slurm group=slurm mode=0750"
-
-  - name: add slurmstate tmp dir
-    file: "path={{ slurm_state_dir }} state=directory owner=slurm group=slurm mode=0750"
+  - name: start and enable slurmdbd
+    service: name=slurmdbd state=started enabled=yes
+    when: slurm_accounting_storage_host == ansible_hostname
 
   - name: sacctmgr show cluster siteName and store in slurm_clusterlist variable
     command: "sacctmgr -n show cluster {{ siteName }}"
@@ -148,6 +114,10 @@
   - name: add cluster to accounting
     command: "sacctmgr -i add cluster {{ siteName }}"
     when: slurm_clusterlist.stdout.find("{{siteName}}") == -1
+
+  - name: disable the slurm init script slurm on el7
+    service: name=slurm enabled=no
+    when: ansible_os_family == "RedHat" and ansible_distribution_major_version == "7"
 
   - name: start and enable slurmctld
     service: name={{ slurmctld_service }} state=started enabled=yes
